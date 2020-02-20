@@ -1,4 +1,8 @@
 # Databricks notebook source
+# MAGIC %md # Group Project for Big Data Course
+
+# COMMAND ----------
+
 # MAGIC %md #TASK 1
 
 # COMMAND ----------
@@ -7,6 +11,27 @@
 import pandas as pd
 ratingsURL = 'https://csc8101storageblob.blob.core.windows.net/datablobcsc8101/ratings.csv'
 ratings = spark.createDataFrame(pd.read_csv(ratingsURL))
+
+# COMMAND ----------
+
+# loading necessary library for the project
+import pandas as pd
+from pyspark.ml.evaluation import RegressionEvaluator
+from pyspark.ml.recommendation import ALS
+from pyspark.ml.tuning import ParamGridBuilder, CrossValidator
+from pyspark.ml.evaluation import RegressionEvaluator
+import pyspark.sql.functions as f
+from pyspark.sql.types import *
+from pyspark.sql import Row
+from operator import add
+from collections import Counter
+from pyspark.sql.functions import col, sum
+import os,sys
+from functools import reduce
+from pyspark.sql.functions import col, lit, when
+from graphframes import*
+import networkx as nx
+import numpy as np
 
 # COMMAND ----------
 
@@ -78,14 +103,6 @@ display(ratingsPerMovie)
 # COMMAND ----------
 
 # MAGIC %md # TASK 2
-
-# COMMAND ----------
-
-#loading necessary library
-from pyspark.ml.evaluation import RegressionEvaluator
-from pyspark.ml.recommendation import ALS
-from pyspark.ml.tuning import ParamGridBuilder, CrossValidator
-from pyspark.ml.evaluation import RegressionEvaluator
 
 # COMMAND ----------
 
@@ -177,16 +194,6 @@ display(predictions)
 
 # COMMAND ----------
 
-# Loading libraries
-import pandas as pd
-import pyspark.sql.functions as f
-from pyspark.sql.types import *
-from pyspark.sql import Row
-from operator import add
-from collections import Counter
-
-# COMMAND ----------
-
 # Taking 27000 users from the dataset
 sampleUsers1 = ratings.select("userId").distinct().sample(fraction=0.2)
 list = sampleUsers1.take(27000)
@@ -196,18 +203,13 @@ sampleUsers.count()
 # COMMAND ----------
 
 # creating ratings_small file for parquet
-from pyspark.sql.functions import when
 ratings_small = ratings[ratings["userId"].isin(sampleUsers.toPandas()["userId"].tolist())]
 ratings_small.count()
 
 # COMMAND ----------
 
-#dbutils.fs.rm('small-rating.parquet', True) 
-
-# COMMAND ----------
-
 # saving ratings_small as parquet file. This won't work if file already exists.
-ratings_small.write.parquet("ratings-small.parquet")
+ # ratings_small.write.parquet("ratings-small.parquet")
 
 # COMMAND ----------
 
@@ -247,7 +249,6 @@ UserMap.count()
 # COMMAND ----------
 
 # finding duplicate edges
-from pyspark.sql.functions import col, sum
 edgesWithDuplicates = UserMap.groupBy(UserMap.columns).count().filter(UserMap.userId != UserMap.userId2)
 edgesWithDuplicates.orderBy("count", ascending=False).show(5)
 
@@ -293,17 +294,6 @@ verticesFiltered.count()
 
 # COMMAND ----------
 
-import os,sys
-import pyspark.sql.functions as f
-
-# COMMAND ----------
-
-from functools import reduce
-from pyspark.sql.functions import col, lit, when
-from graphframes import*
-
-# COMMAND ----------
-
 # MAGIC %md #### Graph
 
 # COMMAND ----------
@@ -318,6 +308,7 @@ display(graph.edges)
 
 # COMMAND ----------
 
+# checkpoint
 sc.setCheckpointDir("dbfs:/tmp/group1/checkpoint")
 # Computes the connected components of the graph.
 connectedComp = graph.connectedComponents()  # DataFrame with new vertices column “component”
@@ -330,7 +321,8 @@ display(connectedComp.sort("component", ascending = False))
 
 # COMMAND ----------
 
-# finding max component for subgraph
+# finding max component for subgraph using connectedComp
+
 max_component = connectedComp.filter(connectedComp["component"]==3)
 edges_max_component_src = edges.join(max_component,max_component.id == 
                           edgesFiltered.src,'inner').select(edgesFiltered.src,edgesFiltered.dst)
@@ -349,17 +341,11 @@ display(test)
 
 # COMMAND ----------
 
-g2 = (connectedComp.describe("component").filter("summary = 'max'").select("component").collect()[0].asDict()['component'])
-
-# COMMAND ----------
-
 # MAGIC %md # TASK 6
 
 # COMMAND ----------
 
-import networkx as nx
-import pandas as pd
-import numpy as np
+del list
 
 # COMMAND ----------
 
@@ -406,6 +392,7 @@ edges = sqlContext.createDataFrame([
 
 # COMMAND ----------
 
+# create metworkx graph
 src = edges.toPandas()["src"].tolist()
 dst = edges.toPandas()["dst"].tolist()
 edges_new = pd.DataFrame()
@@ -422,7 +409,15 @@ G.nodes
 
 # COMMAND ----------
 
-def _single_source_shortest_path_basic(G,s):
+G_1 = sc.parallelize(edges.collect())
+
+# COMMAND ----------
+
+G_2 = G_1.map(lambda x : (x[0],x[1])).collect()
+
+# COMMAND ----------
+
+def SSSP(G,s):
     S = [] # S is a dictionary. It stores the visited nodes
     P = {} # A dictionary to store parent node
     for v in G:
@@ -461,25 +456,25 @@ def betweenness(G):
     for s in G:
         # single source shortest paths
         # use BFS
-        S, P, sigma = _single_source_shortest_path_basic(G,s) # step 1 from lecture note
+        S, P, sigma = SSSP(G,s) # step 1 from lecture note
         # accumulation
-        betweenness = _accumulate_edges(betweenness, S, P, sigma, s) # step 2 and 3 from lecture note
+        betweenness = step_2_edges(betweenness, S, P, sigma, s) # step 2 and 3 from lecture note
     # rescaling
     for n in G:  # remove nodes to only return edges
         del betweenness[n]
-    betweenness = _rescale_e(betweenness, len(G))
+    betweenness = rescale_e(betweenness, len(G))
     return betweenness
 
 # COMMAND ----------
 
 #step 2
-def _accumulate_edges(betweenness, S, P, sigma, s):
+def step_2_edges(betweenness, S, P, sigma, s):
     delta = dict.fromkeys(S, 0)
     while S:
         w = S.pop() # Poping value from last
-        coeff = (1 + delta[w]) / sigma[w] # calculating coefficient value by using weight of edge
+        ce = (1 + delta[w]) / sigma[w] # calculating coefficient value by using weight of edge
         for v in P[w]:
-            c = sigma[v] * coeff
+            c = sigma[v] * ce
             # set order of the node from bottom to top
             if (v, w) not in betweenness:
                 betweenness[(w, v)] += c
@@ -493,8 +488,8 @@ def _accumulate_edges(betweenness, S, P, sigma, s):
 # COMMAND ----------
 
 # rescaling
-#Finally, the true betweenness is obtained by dividing the result by two, since every shortest path will be discovered twice, once for each of its endpoints.
-def _rescale_e(betweenness, n):
+# Finally, the true betweenness is obtained by dividing the result by two, since every shortest path will be discovered twice, once for each of its endpoints.
+def rescale_e(betweenness, n):
     scale = 0.5
     for v in betweenness:
          betweenness[v] *= scale
@@ -503,7 +498,6 @@ def _rescale_e(betweenness, n):
 # COMMAND ----------
 
 # compute the edge betweenness
-
 def CmtyGirvanNewmanStep(G):
     init_ncomp = nx.number_connected_components(G)    #number of components
     ncomp = init_ncomp
@@ -536,6 +530,10 @@ def runGirvanNewman(G,k):
 
 # COMMAND ----------
 
+# MAGIC %md As our top k = 3, so it shows betweenness of top 3 edges. 
+
+# COMMAND ----------
+
 def main():
     runGirvanNewman(G,top_k)
 if __name__ == "__main__":
@@ -543,14 +541,28 @@ if __name__ == "__main__":
 
 # COMMAND ----------
 
+# MAGIC %md From the output, we can see that betweenness of edge of "a" & "b" is 5, for edge "a" & "c"is 1 etc.
+
+# COMMAND ----------
+
 # MAGIC %md ##Girvan-Newman algorithm for subgraph
 
 # COMMAND ----------
 
+# MAGIC %md For subgraph, our algorithm is tested but it shows the memory of the cluster is not enough to run the subgraph.
+
+# COMMAND ----------
+
 #create networkx graph
+# edges with max component is saved as parquet file in dbfs
 subG = spark.read.parquet("edges_max_component.parquet")
-sub_src = subG.toPandas()["src"].tolist()
-sub_dst = subG.toPandas()["dst"].tolist()
+subG_1 = sc.parallelize(subG.collect())
+subG_2 = subG_1.map(lambda x : (x[0],x[1])).collect()
+
+# COMMAND ----------
+
+sub_src = subG_2.toPandas()["src"].tolist()
+sub_dst = subG_2.toPandas()["dst"].tolist()
 edges_sub = pd.DataFrame()
 edges_sub['src'] = sub_src
 edges_sub['dst'] = sub_dst
